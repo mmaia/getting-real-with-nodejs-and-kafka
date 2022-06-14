@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+
+  # https://hub.docker.com/r/confluentinc/cp-zookeeper/tags
+  zookeeper:
+    image: confluentinc/cp-zookeeper:${CONFLUENT_PLATFORM_VERSION} # check .env file
+    container_name: zookeeper
+    platform: ${PLATFORM} # check .env file
+    ports:
+      - "2181:2181"
+    networks:
+      - streaming-platform-network
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      TZ: $TZ
+
+  # https://hub.docker.com/r/confluentinc/cp-kafka/tags
+  kafka:
+    image: confluentinc/cp-kafka:${CONFLUENT_PLATFORM_VERSION}
+    container_name: kafka
+    platform: ${PLATFORM}
+    ports:
+      - "9092:9092"
+    networks:
+      - streaming-platform-network
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
+      KAFKA_NUM_PARTITIONS: 1
+      TZ: $TZ
+    depends_on:
+      - zookeeper
+    tmpfs:
+      - /ok:uid=1000,gid=1000
+    healthcheck:
+      test: 'test -f /ok/ok || (kafka-topics --list --bootstrap-server localhost:9092 && touch /ok/ok)'
+      interval: 1s
+      timeout: 3s
+      retries: 120
+
+  # https://registry.hub.docker.com/r/confluentinc/cp-schema-registry/tags
+  schema-registry:
+    image: confluentinc/cp-schema-registry:${CONFLUENT_PLATFORM_VERSION}
+    platform: ${PLATFORM}
+    container_name: schema-registry
+    ports:
+      - 8081:8081
+    restart: unless-stopped
+    networks:
+      - streaming-platform-network
+    depends_on:
+      - zookeeper
+      - kafka
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: zookeeper:2181
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      TZ: $TZ
+    tmpfs:
+      - /ok:uid=1000,gid=1000
+    healthcheck:
+      test: 'test -f /ok/ok || (curl --fail http://localhost:8081/v1/metadata/id && touch /ok/ok)'
+      interval: 1s
+      timeout: 8s
+      retries: 120
+
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui
+    container_name: kafka-ui
+    platform: ${PLATFORM}
+    ports:
+      - "8090:8080"
+    restart: on-failure
+    environment:
+      - TZ='Europe/Amsterdam'
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:29092
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
+      - KAFKA_CLUSTERS_0_SCHEMAREGISTRY=http://schema-registry:8081
+    networks:
+      - streaming-platform-network
+    depends_on:
+      - kafka
+      - schema-registry
+      - zookeeper
+
+networks:
+  streaming-platform-network:
+    name: streaming-platform-network
+    driver: bridge

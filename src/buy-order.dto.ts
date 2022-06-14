@@ -7,5 +7,5 @@ export class BuyOrderDto {
 
   @IsInt()
   @IsNotEmpty()
-  quantity: number
+  amount: number
 }

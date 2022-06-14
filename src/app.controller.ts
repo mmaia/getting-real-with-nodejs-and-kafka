@@ -8,6 +8,7 @@ export class AppController {
 
   @Post()
   async sendOrder(@Body() buyOrderDto: BuyOrderDto) {
+    return await this.appService.sendOrder(buyOrderDto)
   }
 
   // generated

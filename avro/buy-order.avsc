@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "BuyOrder",
+  "namespace": "com.bitvavo.demo",
+  "fields": [
+    {
+      "name": "asset",
+      "type": "string"
+    },
+    {
+      "name": "amount",
+      "type": "int"
+    }
+  ]
+}
