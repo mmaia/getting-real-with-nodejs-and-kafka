@@ -8,7 +8,8 @@ import { BuyOrderDto } from '../buy-order.dto'
 
 @Injectable()
 export class KafkaService implements OnModuleInit, OnModuleDestroy {
-  private TOPIC = 'buy-order'
+  private INPUT_TOPIC = 'buy-order'
+  private OUTPUT_TOPIC = 'order-completed'
   private schemaId: number
 
   private kafka = new Kafka({
@@ -20,7 +21,11 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     host: 'http://localhost:8081',
   })
 
-  private producer = this.kafka.producer()
+  private producer = this.kafka.producer({
+    transactionalId: 'buy-order-transaction',
+    maxInFlightRequests: 1,
+    idempotent: true,
+  })
 
   private registerSchema = async () => {
     try {
@@ -36,13 +41,18 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   private createTopic = async () => {
     try {
       const topicExists = (await this.kafka.admin().listTopics()).includes(
-        this.TOPIC,
+        this.INPUT_TOPIC,
       )
       if (!topicExists) {
         await this.kafka.admin().createTopics({
           topics: [
             {
-              topic: this.TOPIC,
+              topic: this.INPUT_TOPIC,
+              numPartitions: 1,
+              replicationFactor: 1,
+            },
+            {
+              topic: this.OUTPUT_TOPIC,
               numPartitions: 1,
               replicationFactor: 1,
             },
@@ -61,8 +71,9 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     }
 
     await this.producer.send({
-      topic: this.TOPIC,
+      topic: this.INPUT_TOPIC,
       messages: [message],
+      acks: -1,
     })
   }
 

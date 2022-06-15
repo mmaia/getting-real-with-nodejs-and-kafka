@@ -3,5 +3,15 @@ Content-Type: application/json
 
 {
   "asset": "BTC",
-  "amount": 100
+  "amount": 200
 }
+
+###
+POST http://localhost:3000
+Content-Type: application/json
+
+{
+  "asset": "ETH",
+  "amount": 350
+}
+
