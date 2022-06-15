@@ -6,7 +6,7 @@ import {
 } from '@kafkajs/confluent-schema-registry'
 import { BuyOrderDto } from '../buy-order.dto'
 import { OrderConfirmedDto } from './order-confirmed.dto'
-
+import { v4 as uuidv4 } from 'uuid'
 /**
  * This code was written for a demo and should not be used as an example of good practices for real code. The goal of this
  * piece of code is to show a setup using kafka transactions and was written for a Conference presentation.
@@ -16,7 +16,8 @@ import { OrderConfirmedDto } from './order-confirmed.dto'
 export class KafkaService implements OnModuleInit, OnModuleDestroy {
   INPUT_TOPIC = 'buy-order'
   OUTPUT_TOPIC = 'order-completed'
-  private schemaId: number
+  private buyOrderSchemaId: number
+  private orderConfirmedSchemaId: number
 
   private kafka = new Kafka({
     clientId: 'buy-order-svc-id',
@@ -41,10 +42,22 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     idempotent: true, // guarantees that message will not be duplicated on send
   })
 
-  private registerSchema = async () => {
+  private registerBuyOrderSchema = async () => {
     try {
-      const schema = await readAVSCAsync('./avro/buy-order.avsc')
-      const { id } = await this.registry.register(schema)
+      const buyOrderSchema = await readAVSCAsync('avro/buy-order.avsc')
+      const { id } = await this.registry.register(buyOrderSchema)
+      return id
+    } catch (e) {
+      console.log(e)
+    }
+  }
+
+  private registerOrderConfirmedSchema = async () => {
+    try {
+      const orderConfirmedSchema = await readAVSCAsync(
+        'avro/order-confirmed.avsc',
+      )
+      const { id } = await this.registry.register(orderConfirmedSchema)
       return id
     } catch (e) {
       console.log(e)
@@ -81,7 +94,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   async sendBuyOrder(buyOrderDto: BuyOrderDto) {
     const message = {
       key: buyOrderDto.asset,
-      value: await this.registry.encode(this.schemaId, buyOrderDto),
+      value: await this.registry.encode(this.buyOrderSchemaId, buyOrderDto),
     }
 
     await this.buyOrderProducer.send({
@@ -96,11 +109,16 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
         eachMessage: async (consumerRecord) => {
           const { topic, partition, message } = consumerRecord
           const prefix = `${topic}[${partition} | ${message.offset}] / ${message.timestamp}`
+          const buyOrderDto = await this.registry.decode(message.value)
           console.log(
-            `Message processed - ${prefix} -> ${
-              message.key
-            }#${await this.registry.decode(message.value)}`,
+            `Message processed - ${prefix} -> ${message.key}#${buyOrderDto}`,
           )
+          const orderConfirmed = {
+            orderId: uuidv4(),
+            asset: buyOrderDto.asset,
+            amount: buyOrderDto.amount,
+          }
+          await this.sendOrderConfirmation(orderConfirmed)
         },
       })
     } catch (err) {
@@ -111,15 +129,19 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   async sendOrderConfirmation(orderConfirmed: OrderConfirmedDto) {
     const message = {
       key: orderConfirmed.orderId,
-      value: await this.registry.encode(this.schemaId, orderConfirmed),
+      value: await this.registry.encode(
+        this.orderConfirmedSchemaId,
+        orderConfirmed,
+      ),
     }
-    const transaction = await this.buyOrderProducer.transaction()
+    const transaction = await this.confirmOrderProducer.transaction()
     try {
-      await this.buyOrderProducer.send({
+      await this.confirmOrderProducer.send({
         topic: this.OUTPUT_TOPIC,
         messages: [message],
         acks: -1,
       })
+      await transaction.commit()
     } catch (e) {
       await transaction.abort()
     }
@@ -128,7 +150,8 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     try {
       await this.createTopic()
-      this.schemaId = await this.registerSchema()
+      this.buyOrderSchemaId = await this.registerBuyOrderSchema()
+      this.orderConfirmedSchemaId = await this.registerOrderConfirmedSchema()
       await this.buyOrderProducer.connect()
       await this.orderConsumer.connect()
       const consumerTopics: ConsumerSubscribeTopics = {

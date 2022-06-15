@@ -16,9 +16,10 @@ services:
       TZ: $TZ
 
   # https://hub.docker.com/r/confluentinc/cp-kafka/tags
-  kafka:
+  kafka_1:
     image: confluentinc/cp-kafka:${CONFLUENT_PLATFORM_VERSION}
-    container_name: kafka
+    container_name: kafka_1
+    hostname: kafka_1
     platform: ${PLATFORM}
     ports:
       - "9092:9092"
@@ -29,8 +30,8 @@ services:
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka_1:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
       KAFKA_NUM_PARTITIONS: 1
@@ -41,6 +42,65 @@ services:
       - /ok:uid=1000,gid=1000
     healthcheck:
       test: 'test -f /ok/ok || (kafka-topics --list --bootstrap-server localhost:9092 && touch /ok/ok)'
+      interval: 1s
+      timeout: 3s
+      retries: 120
+
+  kafka_2:
+    image: confluentinc/cp-kafka:${CONFLUENT_PLATFORM_VERSION}
+    container_name: kafka_2
+    platform: ${PLATFORM}
+    ports:
+      - "9093:9093"
+    networks:
+      - streaming-platform-network
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ADVERTISE_PORT: 9093
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka_2:29092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
+      KAFKA_NUM_PARTITIONS: 1
+      TZ: $TZ
+    depends_on:
+      - zookeeper
+    tmpfs:
+      - /ok:uid=1000,gid=1000
+    healthcheck:
+      test: 'test -f /ok/ok || (kafka-topics --list --bootstrap-server localhost:9093 && touch /ok/ok)'
+      interval: 1s
+      timeout: 3s
+      retries: 120
+
+  kafka_3:
+    image: confluentinc/cp-kafka:${CONFLUENT_PLATFORM_VERSION}
+    container_name: kafka_3
+    platform: ${PLATFORM}
+    ports:
+      - "9094:9094"
+    networks:
+      - streaming-platform-network
+    environment:
+      KAFKA_BROKER_ID: 3
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka_3:29092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
+      KAFKA_NUM_PARTITIONS: 1
+      TZ: $TZ
+    depends_on:
+      - zookeeper
+    tmpfs:
+      - /ok:uid=1000,gid=1000
+    healthcheck:
+      test: 'test -f /ok/ok || (kafka-topics --list --bootstrap-server localhost:9094 && touch /ok/ok)'
       interval: 1s
       timeout: 3s
       retries: 120
@@ -61,7 +121,7 @@ services:
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: zookeeper:2181
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka_1:29092
       TZ: $TZ
     tmpfs:
       - /ok:uid=1000,gid=1000
@@ -82,13 +142,13 @@ services:
     environment:
       - TZ='Europe/Amsterdam'
       - KAFKA_CLUSTERS_0_NAME=local
-      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:29092
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka_1:29092
       - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
       - KAFKA_CLUSTERS_0_SCHEMAREGISTRY=http://schema-registry:8081
     networks:
       - streaming-platform-network
     depends_on:
-      - kafka
+      - kafka_1
       - schema-registry
       - zookeeper
 
