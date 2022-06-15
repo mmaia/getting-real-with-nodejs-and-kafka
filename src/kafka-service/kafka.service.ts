@@ -20,7 +20,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   private buyOrderSchemaId: number
   private orderConfirmedSchemaId: number
   private consumerGroupId = 'order-transactional-consumer'
-  private transactionId = 'buy-order-transaction'
+  private transactionId = 'buy-order-transaction-id'
 
   private kafka = new Kafka({
     clientId: 'buy-order-svc-id',
@@ -32,17 +32,18 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   })
 
   private buyOrderProducer = this.kafka.producer({
+    transactionalId: this.transactionId, // the transaction id used to fence
+    maxInFlightRequests: 1, // required by transaction semantics EoS(Exactly once Semantics)
     idempotent: true, // guarantees that message will not be duplicated on send
   })
 
   private orderConsumer = this.kafka.consumer({
     groupId: this.consumerGroupId,
     maxInFlightRequests: 1,
+    readUncommitted: false,
   })
 
   private confirmOrderProducer = this.kafka.producer({
-    transactionalId: this.transactionId, // the transaction id used to fence
-    maxInFlightRequests: 1, // required by transaction semantics EoS(Exactly once Semantics)
     idempotent: true, // guarantees that message will not be duplicated on send
   })
 
@@ -100,11 +101,19 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
       key: buyOrderDto.asset,
       value: await this.registry.encode(this.buyOrderSchemaId, buyOrderDto),
     }
-
-    await this.buyOrderProducer.send({
-      topic: this.inputTopic,
-      messages: [message],
-    })
+    const transaction = await this.buyOrderProducer.transaction()
+    try {
+      await transaction.send({
+        acks: -1,
+        topic: this.inputTopic,
+        messages: [message],
+      })
+      // do something here that you only want to commit if it actually succeed, otherwise abort
+      await transaction.commit()
+    } catch (err) {
+      await transaction.abort()
+      console.log('Error, transaction aborted: ', err)
+    }
   }
 
   async processMessages() {
@@ -114,16 +123,26 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
         eachMessage: async (consumerRecord) => {
           const { topic, partition, message } = consumerRecord
           const buyOrderDto = await this.registry.decode(message.value)
+          console.log(
+            `received message from topic ${topic}, partition ${partition}, message: ${buyOrderDto}`,
+          )
           const orderConfirmed = {
             orderId: uuidv4(),
             asset: buyOrderDto.asset,
             amount: buyOrderDto.amount,
           }
-          await this.sendOrderConfirmation(
-            orderConfirmed,
-            partition,
-            message.offset,
-          )
+          const success = await this.sendOrderConfirmation(orderConfirmed)
+          if (success) {
+            await this.orderConsumer.commitOffsets([
+              {
+                topic: this.inputTopic,
+                partition: partition,
+                offset: message.offset,
+              },
+            ])
+          } else {
+            console.log('order confirmation failed, not committing offset')
+          }
         },
       })
     } catch (err) {
@@ -133,9 +152,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
 
   async sendOrderConfirmation(
     orderConfirmed: OrderConfirmedDto,
-    partition: number,
-    offset: string,
-  ) {
+  ): Promise<boolean> {
     const message = {
       key: orderConfirmed.orderId,
       value: await this.registry.encode(
@@ -143,34 +160,17 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
         orderConfirmed,
       ),
     }
-    const topics: TopicOffsets[] = [
-      {
-        topic: this.inputTopic,
-        partitions: [
-          {
-            partition: partition,
-            offset: offset,
-          },
-        ],
-      },
-    ]
-    const transaction = await this.confirmOrderProducer.transaction()
     try {
-      await transaction.send({
+      await this.confirmOrderProducer.send({
         topic: this.outputTopic,
         messages: [message],
         acks: -1,
       })
-      console.log('transaction sent')
-      await transaction.sendOffsets({
-        consumerGroupId: this.consumerGroupId,
-        topics: topics,
-      })
-      console.log('offsets sent')
-      await transaction.commit()
-      console.log('transaction committed')
+      console.log('order confirmation sent')
+      return true
     } catch (e) {
-      await transaction.abort()
+      console.log('Error sending order confirmation: ', e)
+      return false
     }
   }
 
@@ -181,6 +181,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
       this.orderConfirmedSchemaId = await this.registerOrderConfirmedSchema()
       await this.buyOrderProducer.connect()
       await this.orderConsumer.connect()
+      await this.confirmOrderProducer.connect()
       const consumerTopics: ConsumerSubscribeTopics = {
         topics: [this.inputTopic],
         fromBeginning: false,
