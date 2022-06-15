@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "OrderConfirmed",
+  "namespace": "com.bitvavo.demo",
+  "fields": [
+    {
+      "name": "orderId",
+      "type": "string"
+    },
+    {
+      "name": "asset",
+      "type": "string"
+    },
+    {
+      "name": "amount",
+      "type": "int"
+    }
+  ]
+}

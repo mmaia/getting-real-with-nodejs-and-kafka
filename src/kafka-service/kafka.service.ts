@@ -1,15 +1,21 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
-import { Kafka } from 'kafkajs'
+import { ConsumerSubscribeTopics, Kafka } from 'kafkajs'
 import {
   readAVSCAsync,
   SchemaRegistry,
 } from '@kafkajs/confluent-schema-registry'
 import { BuyOrderDto } from '../buy-order.dto'
+import { OrderConfirmedDto } from './order-confirmed.dto'
+
+/**
+ * This code was written for a demo and should not be used as an example of good practices for real code. The goal of this
+ * piece of code is to show a setup using kafka transactions and was written for a Conference presentation.
+ */
 
 @Injectable()
 export class KafkaService implements OnModuleInit, OnModuleDestroy {
-  private INPUT_TOPIC = 'buy-order'
-  private OUTPUT_TOPIC = 'order-completed'
+  INPUT_TOPIC = 'buy-order'
+  OUTPUT_TOPIC = 'order-completed'
   private schemaId: number
 
   private kafka = new Kafka({
@@ -21,10 +27,18 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     host: 'http://localhost:8081',
   })
 
-  private producer = this.kafka.producer({
-    transactionalId: 'buy-order-transaction',
-    maxInFlightRequests: 1,
-    idempotent: true,
+  private buyOrderProducer = this.kafka.producer({
+    idempotent: true, // guarantees that message will not be duplicated on send
+  })
+
+  private orderConsumer = this.kafka.consumer({
+    groupId: 'order-transactional-consumer',
+  })
+
+  private confirmOrderProducer = this.kafka.producer({
+    transactionalId: 'buy-order-transaction', // the transaction id used to fence
+    maxInFlightRequests: 1, // required by transaction semantics EoS(Exactly once Semantics)
+    idempotent: true, // guarantees that message will not be duplicated on send
   })
 
   private registerSchema = async () => {
@@ -64,26 +78,72 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async sendMessage(buyOrderDto: BuyOrderDto) {
+  async sendBuyOrder(buyOrderDto: BuyOrderDto) {
     const message = {
       key: buyOrderDto.asset,
       value: await this.registry.encode(this.schemaId, buyOrderDto),
     }
 
-    await this.producer.send({
+    await this.buyOrderProducer.send({
       topic: this.INPUT_TOPIC,
       messages: [message],
-      acks: -1,
     })
   }
 
+  async processMessages() {
+    try {
+      await this.orderConsumer.run({
+        eachMessage: async (consumerRecord) => {
+          const { topic, partition, message } = consumerRecord
+          const prefix = `${topic}[${partition} | ${message.offset}] / ${message.timestamp}`
+          console.log(
+            `Message processed - ${prefix} -> ${
+              message.key
+            }#${await this.registry.decode(message.value)}`,
+          )
+        },
+      })
+    } catch (err) {
+      console.log('Error: ', err)
+    }
+  }
+
+  async sendOrderConfirmation(orderConfirmed: OrderConfirmedDto) {
+    const message = {
+      key: orderConfirmed.orderId,
+      value: await this.registry.encode(this.schemaId, orderConfirmed),
+    }
+    const transaction = await this.buyOrderProducer.transaction()
+    try {
+      await this.buyOrderProducer.send({
+        topic: this.OUTPUT_TOPIC,
+        messages: [message],
+        acks: -1,
+      })
+    } catch (e) {
+      await transaction.abort()
+    }
+  }
+
   async onModuleInit() {
-    await this.createTopic()
-    this.schemaId = await this.registerSchema()
-    await this.producer.connect()
+    try {
+      await this.createTopic()
+      this.schemaId = await this.registerSchema()
+      await this.buyOrderProducer.connect()
+      await this.orderConsumer.connect()
+      const consumerTopics: ConsumerSubscribeTopics = {
+        topics: [this.INPUT_TOPIC],
+        fromBeginning: false,
+      }
+      await this.orderConsumer.subscribe(consumerTopics)
+      await this.processMessages()
+      console.log('Yey! App with Kafka Connection setup initialized!')
+    } catch (err) {
+      console.log('Ooops error: ', err)
+    }
   }
 
   async onModuleDestroy() {
-    await this.producer.disconnect()
+    await this.buyOrderProducer.disconnect()
   }
 }

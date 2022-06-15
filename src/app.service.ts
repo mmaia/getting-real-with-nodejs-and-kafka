@@ -7,7 +7,7 @@ export class AppService {
   constructor(private kafkaService: KafkaService) {}
 
   async sendOrder(buyOrderDto: BuyOrderDto) {
-    await this.kafkaService.sendMessage(buyOrderDto)
+    await this.kafkaService.sendBuyOrder(buyOrderDto)
     console.log('order sent: ', buyOrderDto)
   }
 
