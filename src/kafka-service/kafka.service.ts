@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
-import { ConsumerSubscribeTopics, Kafka } from 'kafkajs'
+import { ConsumerSubscribeTopics, Kafka, TopicOffsets } from 'kafkajs'
 import {
   readAVSCAsync,
   SchemaRegistry,
@@ -7,6 +7,7 @@ import {
 import { BuyOrderDto } from '../buy-order.dto'
 import { OrderConfirmedDto } from './order-confirmed.dto'
 import { v4 as uuidv4 } from 'uuid'
+
 /**
  * This code was written for a demo and should not be used as an example of good practices for real code. The goal of this
  * piece of code is to show a setup using kafka transactions and was written for a Conference presentation.
@@ -14,14 +15,16 @@ import { v4 as uuidv4 } from 'uuid'
 
 @Injectable()
 export class KafkaService implements OnModuleInit, OnModuleDestroy {
-  INPUT_TOPIC = 'buy-order'
-  OUTPUT_TOPIC = 'order-completed'
+  private inputTopic = 'buy-order'
+  private outputTopic = 'order-completed'
   private buyOrderSchemaId: number
   private orderConfirmedSchemaId: number
+  private consumerGroupId = 'order-transactional-consumer'
+  private transactionId = 'buy-order-transaction'
 
   private kafka = new Kafka({
     clientId: 'buy-order-svc-id',
-    brokers: ['localhost:9092'],
+    brokers: ['localhost:9092', 'localhost:9093', 'localhost:9094'],
   })
 
   private registry = new SchemaRegistry({
@@ -33,11 +36,12 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   })
 
   private orderConsumer = this.kafka.consumer({
-    groupId: 'order-transactional-consumer',
+    groupId: this.consumerGroupId,
+    maxInFlightRequests: 1,
   })
 
   private confirmOrderProducer = this.kafka.producer({
-    transactionalId: 'buy-order-transaction', // the transaction id used to fence
+    transactionalId: this.transactionId, // the transaction id used to fence
     maxInFlightRequests: 1, // required by transaction semantics EoS(Exactly once Semantics)
     idempotent: true, // guarantees that message will not be duplicated on send
   })
@@ -68,20 +72,20 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   private createTopic = async () => {
     try {
       const topicExists = (await this.kafka.admin().listTopics()).includes(
-        this.INPUT_TOPIC,
+        this.inputTopic,
       )
       if (!topicExists) {
         await this.kafka.admin().createTopics({
           topics: [
             {
-              topic: this.INPUT_TOPIC,
-              numPartitions: 1,
-              replicationFactor: 1,
+              topic: this.inputTopic,
+              numPartitions: 3,
+              replicationFactor: 3,
             },
             {
-              topic: this.OUTPUT_TOPIC,
-              numPartitions: 1,
-              replicationFactor: 1,
+              topic: this.outputTopic,
+              numPartitions: 3,
+              replicationFactor: 3,
             },
           ],
         })
@@ -98,7 +102,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     }
 
     await this.buyOrderProducer.send({
-      topic: this.INPUT_TOPIC,
+      topic: this.inputTopic,
       messages: [message],
     })
   }
@@ -106,19 +110,20 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   async processMessages() {
     try {
       await this.orderConsumer.run({
+        autoCommit: false,
         eachMessage: async (consumerRecord) => {
           const { topic, partition, message } = consumerRecord
-          const prefix = `${topic}[${partition} | ${message.offset}] / ${message.timestamp}`
           const buyOrderDto = await this.registry.decode(message.value)
-          console.log(
-            `Message processed - ${prefix} -> ${message.key}#${buyOrderDto}`,
-          )
           const orderConfirmed = {
             orderId: uuidv4(),
             asset: buyOrderDto.asset,
             amount: buyOrderDto.amount,
           }
-          await this.sendOrderConfirmation(orderConfirmed)
+          await this.sendOrderConfirmation(
+            orderConfirmed,
+            partition,
+            message.offset,
+          )
         },
       })
     } catch (err) {
@@ -126,7 +131,11 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async sendOrderConfirmation(orderConfirmed: OrderConfirmedDto) {
+  async sendOrderConfirmation(
+    orderConfirmed: OrderConfirmedDto,
+    partition: number,
+    offset: string,
+  ) {
     const message = {
       key: orderConfirmed.orderId,
       value: await this.registry.encode(
@@ -134,14 +143,32 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
         orderConfirmed,
       ),
     }
+    const topics: TopicOffsets[] = [
+      {
+        topic: this.inputTopic,
+        partitions: [
+          {
+            partition: partition,
+            offset: offset,
+          },
+        ],
+      },
+    ]
     const transaction = await this.confirmOrderProducer.transaction()
     try {
-      await this.confirmOrderProducer.send({
-        topic: this.OUTPUT_TOPIC,
+      await transaction.send({
+        topic: this.outputTopic,
         messages: [message],
         acks: -1,
       })
+      console.log('transaction sent')
+      await transaction.sendOffsets({
+        consumerGroupId: this.consumerGroupId,
+        topics: topics,
+      })
+      console.log('offsets sent')
       await transaction.commit()
+      console.log('transaction committed')
     } catch (e) {
       await transaction.abort()
     }
@@ -155,7 +182,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
       await this.buyOrderProducer.connect()
       await this.orderConsumer.connect()
       const consumerTopics: ConsumerSubscribeTopics = {
-        topics: [this.INPUT_TOPIC],
+        topics: [this.inputTopic],
         fromBeginning: false,
       }
       await this.orderConsumer.subscribe(consumerTopics)
